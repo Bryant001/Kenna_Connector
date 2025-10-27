@@ -12,6 +12,7 @@ CURRENT STATE:
 • This script is still IN-PROGRESS and mainly used for testing how we can ingest the Reporting API data into Kenna
 • As of 7/30/3035 we are still testing with running the Reporting API on 1 or 2 app_ids. 
 • Once we figure out how to ingest the data with one app profile, we should scale to do this for ALL App Profiles
+• Need to add solution/recommendation data to findings per Cotality
 """
 
 from __future__ import annotations
@@ -24,14 +25,15 @@ from veracode_api_signing.plugin_requests import RequestsAuthPluginVeracodeHMAC
 
 
 # API Call and Credential Settings: 
-API_KEY_ID     = "185336e8c554fc4ad2fa809f43e4e77b"    # Hard-coded crednetials in case customers want to quickly test the script with their account
-API_KEY_SECRET = "8f24efb247a42e1f56200795a8284673656be85472c166fc9e76f73d3af16ad2fb3934ba57282876d1ea2c43311044946b8ac4da3e78031ef03016096161a48c"    # Leave **both** blank to use env vars or ~/.veracode/credentials file
+API_KEY_ID     = "***client API ID***"    # Hard-coded crednetials in case customers want to quickly test the script with their account
+API_KEY_SECRET = "***client API KEY***"    # Leave **both** blank to use env vars or ~/.veracode/credentials file
 
 # You can always test with App_ID 2457394, which is one of their retired App Profiles
-APP_IDS     = [1811880]                                         # One or many numeric App IDs. It's the 2nd number in the app profile URL.
+APP_IDS     = ["***client app id***"]                                         # One or many numeric App IDs. It's the 2nd number in the app profile URL.
 SCAN_TYPES  = ["Static Analysis", "Dynamic Analysis", "SCA"]    # MPT can be added optionally as "Manual Analysis"
 WINDOW_DAYS = 180                                               # Set amount of days to look back for findings
 BASE_URL    = "https://api.veracode.com"
+POLICY_SANDBOX = "Policy"
 # ─────────────────────────
 
 
@@ -80,6 +82,7 @@ for app_id in APP_IDS:
     payload = {
         "report_type": "FINDINGS",
         "scan_type":   SCAN_TYPES,
+        "policy_sandbox": POLICY_SANDBOX,
         "app_id":      app_id,
         "last_updated_start_date": start_utc.strftime("%Y-%m-%d %H:%M:%S")
     }
@@ -125,25 +128,34 @@ assets: Dict[str, Dict[str, Any]] = {}
 vdefs:  Dict[Tuple[str, str], Dict[str, Any]] = {}
 
 for r in rows:
-    aid = str(r["app_id"])
-    asset = assets.setdefault(aid, {
-        "external_id": aid,
+# Iterate over findings and assign filename as file/module/component name if available, otherwise use "UnknownFile"
+    file = (
+    r.get("filename") if r.get("filename") else
+    r.get("module_name") if r.get("module_name") else
+    r.get("component_name") if r.get("component_name") else
+    "UnknownFile"
+)
+    # Define asset for each unique file or module
+    asset = assets.setdefault(file, {
+        "file": file,
         "application": r["app_name"],
         "tags": [f"BusinessUnit:{r.get('business_unit','UnknownBU')}"],
         "vulns": []
     })
 
+    # Variables for adding tags
     scan_type = f'Veracode {r["scan_type"]}'
-
-    # Add Kenna-style tags on the asset
+    scan_label_map = {"SCA": "SCA", "Static Analysis": "STATIC", "Dynamic Analysis": "DAST", "Manual Analysis": "MPT"}
     bu = r.get("business_unit", "Unknown")
     bc = r.get("business_criticality") or r.get("business_criticality_rating") or r.get("business_criticality_desc")
-    add_tag(asset, f"BusinessUnit: {bu}")
-    add_tag(asset, f"veracode_app: {r['app_name']}")
-    if bc: add_tag(asset, f"veracode_bc: {bc}")
+
+    # Add Kenna-style tags on the asset
+    # add_tag(asset, f"VC: Internal")
+    # add_tag(asset, f"BusinessUnit: {bu}")
     add_tag(asset, f"veracode_bu: {bu}")
-    scan_label_map = {"SCA": "SCA", "Static Analysis": "STATIC", "Dynamic Analysis": "DAST", "Manual Analysis": "MPT"}
+    if bc: add_tag(asset, f"veracode_bc: {bc}")
     add_tag(asset, f"veracode_scan_type: {scan_label_map.get(r['scan_type'], r['scan_type'])}")
+    add_tag(asset, f"veracode_app: {r['app_name']}")
 
     # Blank out CVE for Static findings
     if r["scan_type"] == "Static Analysis":
@@ -203,11 +215,12 @@ for r in rows:
     # ---- build vuln_def ----
     vdef_key = (scan_type, vdef_name)
     if vdef_key not in vdefs:
+        combined = " ".join(str(x) for x in [r.get("vulnerability_title"), r.get("cwe_description"), r.get("description"), r.get("library_description")] if x)
         vdef_entry = {
             "scanner_type": scan_type,
             "name":         vdef_name,
-            "description":  r.get("vulnerability_title") or r.get("description") or ""
-            # TODO: should the above be contatonated?  
+            "description":  combined or "No description provided."
+            # TODO: should the above be concatonated?  
         }
 
         # Only include cve_identifiers for SCA findings and if SCA finding is SRCCLR remove cve_identifiers
